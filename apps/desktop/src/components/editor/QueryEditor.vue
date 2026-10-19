@@ -67,6 +67,7 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { statementNavigationTarget, type StatementNavigationDirection } from "@/lib/sql/statementNavigation";
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 
@@ -1223,6 +1224,24 @@ function selectCurrentStatementFromContextMenu(): void {
   selectCurrentStatementFromView(currentView);
 }
 
+/**
+ * Move the caret between executable statements without changing the document.
+ * Reuses the same statement ranges as 「执行当前语句」/「选中当前语句」 so the
+ * navigation boundaries always match what execution would run.
+ */
+function navigateStatementFromView(currentView: EditorViewType, direction: StatementNavigationDirection): boolean {
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
+  const target = statementNavigationTarget(executableStatementRangeCache.ranges, currentView.state.selection.main.head, direction);
+  if (target === null) return false;
+  currentView.dispatch({
+    selection: { anchor: target },
+    scrollIntoView: true,
+    userEvent: "select.keyboard",
+  });
+  currentView.focus();
+  return true;
+}
+
 const contextMenuActions: QueryEditorContextMenuActions = {
   executeFromContextMenu,
   executeInNewResultTabFromContextMenu,
@@ -1435,6 +1454,9 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.redo, (view) => codeMirrorRuntime.codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorRuntime.codeMirrorSelectAll?.(view) ?? false),
         ...binding(shortcuts.selectCurrentStatement, selectCurrentStatementFromView),
+        ...binding(shortcuts.previousStatement, (currentView) => navigateStatementFromView(currentView, "previous")),
+        ...binding(shortcuts.nextStatement, (currentView) => navigateStatementFromView(currentView, "next")),
+        ...binding(shortcuts.statementStart, (currentView) => navigateStatementFromView(currentView, "start")),
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
