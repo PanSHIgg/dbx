@@ -120,6 +120,8 @@ import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboar
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
 import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
 import { configureVimSystemClipboard } from "@/lib/editor/vimSystemClipboard";
+import { configureVimDbxActions, DBX_VIM_ACTION_EVENT, type DbxVimActionEvent } from "@/lib/editor/vimDbxActions";
+import type { ShortcutActionId } from "@/lib/editor/shortcutRegistry";
 
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 
@@ -261,10 +263,11 @@ const kingbaseConfig = computed(() => (props.databaseType === "kingbase" && prop
 const kingbaseSqlType = computed(() => kingbaseSqlDatabaseType(kingbaseConfig.value));
 
 function sqlStatementParameterOptions() {
-  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
+  const compatibilityMode = props.databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(props.connectionId, props.database) : kingbaseConfig.value?.database_info?.compatibilityMode;
+  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled, compatibilityMode);
   return {
     databaseType: kingbaseSqlType.value ?? props.databaseType,
-    compatibilityMode: props.databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(props.connectionId, props.database) : kingbaseConfig.value?.database_info?.compatibilityMode,
+    compatibilityMode,
     enabledSyntaxes: enabledSqlParameterSyntaxes(toggles),
   };
 }
@@ -972,7 +975,8 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
   // Right-click must stay instant: resolve from completion/tree caches and keep the legacy table fallback when metadata is unavailable.
   const candidate = resolveQueryContextCandidateDatabase(parsedCandidate, connectionStore.lookupLocalCompletionDatabases(parsedCandidate.connectionId, parsedCandidate.database, MAX_COMPLETION_TABLES));
   const tables = connectionStore.lookupLocalCompletionTables(candidate.connectionId, candidate.database, candidate.tableName, MAX_COMPLETION_TABLES, candidate.schema, props.catalog);
-  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables);
+  const preferredSchema = props.schema ?? connectionStore.getConfig(props.connectionId)?.default_schema;
+  contextObjectTarget.value = resolveQueryContextObjectTarget(candidate, tables, preferredSchema);
 }
 
 function focusEditor() {
@@ -1607,6 +1611,67 @@ function configureDbxVimCommands(vimApi: typeof import("@replit/codemirror-vim")
   vimApi.defineEx("write", "w", (cm) => {
     cm.cm6?.contentDOM.dispatchEvent(new CustomEvent(DBX_VIM_SAVE_EVENT, { bubbles: true }));
   });
+  configureVimDbxActions(vimApi, {
+    onUnknownAction: (name) => toast(name ? `Unknown DBX action: ${name}` : "Usage: :dbx <action>", 3000),
+  });
+}
+
+// Editor-scoped actions reachable from `:dbx <action>`. Each entry reuses the
+// same function the keyboard shortcut runs, so Vim and shortcuts cannot drift.
+// Return false when the action does not apply; the event then keeps bubbling
+// so an outer listener (App.vue) can handle app-scoped actions.
+const vimDbxActionHandlers: Partial<Record<ShortcutActionId, (currentView: EditorViewType) => boolean>> = {
+  executeSql: (currentView) => {
+    if (props.hideExecutionControls || shouldBlockExecutionShortcut(undefined, currentView)) return true;
+    requestExecute({ bypassPicker: false });
+    return true;
+  },
+  executeSqlInNewResultTab: (currentView) => {
+    if (props.hideExecutionControls || shouldBlockExecutionShortcut(undefined, currentView)) return true;
+    requestExecuteInNewResultTab();
+    return true;
+  },
+  explainSql: (currentView) => {
+    if (!props.enableExplainShortcut || !props.canExplain || shouldBlockExecutionShortcut(undefined, currentView)) return true;
+    emit("explain");
+    return true;
+  },
+  formatSql: () => {
+    void formatCurrentSql();
+    return true;
+  },
+  saveSql: () => {
+    emit("save");
+    return true;
+  },
+  expandSelectStar: (currentView) => {
+    const target = selectStarExpansionTargetForView(currentView);
+    if (target) void expandSelectStar(target);
+    return true;
+  },
+  toggleLineComment: (currentView) => codeMirrorRuntime.codeMirrorToggleLineComment?.(currentView) ?? false,
+  toggleBlockComment: (currentView) => (supportsQueryEditorBlockComments(props.databaseType) ? (codeMirrorRuntime.codeMirrorToggleBlockComment?.(currentView) ?? false) : true),
+  selectCurrentStatement: selectCurrentStatementFromView,
+  previousStatement: (currentView) => navigateStatementFromView(currentView, "previous"),
+  nextStatement: (currentView) => navigateStatementFromView(currentView, "next"),
+  statementStart: (currentView) => navigateStatementFromView(currentView, "start"),
+  uppercaseSelection: () => convertSelectedSqlCase("upper"),
+  lowercaseSelection: () => convertSelectedSqlCase("lower"),
+  sendSelectionToAi: (currentView) => {
+    const sql = selectedSqlFromView(currentView);
+    if (sql.trim()) emit("sendSelectionToAi", sql);
+    return true;
+  },
+  sqlIntentionActions: handleSqlIntentionActions,
+};
+
+function handleVimDbxAction(event: Event, currentView: EditorViewType): boolean {
+  const { action } = (event as DbxVimActionEvent).detail;
+  const handler = vimDbxActionHandlers[action];
+  if (!handler || !handler(currentView)) return false;
+  // Handled here: keep App.vue's fallback listener from running it again.
+  event.stopPropagation();
+  return true;
 }
 
 let vimConfigApplied = false;
@@ -2337,6 +2402,9 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           [DBX_VIM_SAVE_EVENT]() {
             emit("save");
             return true;
+          },
+          [DBX_VIM_ACTION_EVENT](event: Event, currentView: EditorViewType) {
+            return handleVimDbxAction(event, currentView);
           },
           wheel(event) {
             if (!wheelZoomGestureGuard.accepts(event)) return false;

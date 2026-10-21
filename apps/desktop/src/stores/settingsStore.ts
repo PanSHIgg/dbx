@@ -1195,6 +1195,7 @@ export interface EditorSettings {
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
   sidebarShowTooltips: boolean;
+  sidebarShowUserAdmin: boolean;
   sidebarAllowHorizontalScroll: boolean;
   sidebarIndent: number;
   sidebarFontSize: number;
@@ -1544,6 +1545,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
   sidebarShowTooltips: true,
+  sidebarShowUserAdmin: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
@@ -2269,6 +2271,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
+    sidebarShowUserAdmin: settings.sidebarShowUserAdmin ?? DEFAULT_EDITOR_SETTINGS.sidebarShowUserAdmin,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
@@ -3165,6 +3168,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
+    if (partial.sidebarShowUserAdmin !== undefined) editorSettings.value.sidebarShowUserAdmin = partial.sidebarShowUserAdmin;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);

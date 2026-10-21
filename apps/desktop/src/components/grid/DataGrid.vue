@@ -479,8 +479,20 @@ const largeValueResolutionVersion = ref(0);
 const tableDataFullTextMode = ref(false);
 const tableDataFullTextLoading = ref(false);
 const tableDataPreviewNoticeDismissed = ref(false);
+// Dismissing the banner only silences it for the current result, so every new
+// table or page brought it back. The "don't show again" action persists here
+// and leaves a compact icon that still loads the full text on demand (#12906).
+const TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY = "dbx-table-data-preview-notice-hidden";
+function readTableDataPreviewNoticeHidden(): boolean {
+  try {
+    return localStorage.getItem(TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+const tableDataPreviewNoticeHidden = ref(readTableDataPreviewNoticeHidden());
 const tableDataPreviewTruncated = computed(() => !!props.tableMeta && (props.result.large_value_cells?.length ?? 0) > 0);
-const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeDismissed.value);
+const showTableDataPreviewNotice = computed(() => tableDataPreviewTruncated.value && !tableDataFullTextMode.value && !tableDataPreviewNoticeHidden.value && !tableDataPreviewNoticeDismissed.value);
 const tableDataFullTextEnabled = computed(() => !!props.tableMeta && tableDataFullTextMode.value);
 const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
@@ -2799,7 +2811,7 @@ function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellVal
   return showWhitespaceEnabled.value && typeof display === "string" ? gridCellDisplayValue(display, flatteningMultiLineEnabled.value, true) : display;
 }
 
-const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitColumn, autoFitAllColumns, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
+const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitColumn, autoFitAllColumns, resetColumnWidths, hasUserSizedColumns, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
@@ -5969,6 +5981,19 @@ async function loadCurrentPageFullText() {
 
 function dismissTableDataPreviewNotice() {
   tableDataPreviewNoticeDismissed.value = true;
+}
+
+/// Persistently silences the banner across tables and pages. The toolbar action
+/// row keeps "load the full text for this page" reachable without leaving an
+/// empty banner line behind.
+function hideTableDataPreviewNoticeForGood() {
+  tableDataPreviewNoticeHidden.value = true;
+  try {
+    localStorage.setItem(TABLE_DATA_PREVIEW_NOTICE_HIDDEN_KEY, "1");
+  } catch {
+    // Storage can be unavailable (private mode, quota); the banner then simply
+    // comes back on the next start instead of failing the click.
+  }
 }
 
 const exportContextCell = computed(() => {
@@ -13894,6 +13919,8 @@ defineExpose({
   moveDisplayableColumn,
   resetColumnOrder,
   autoFitAllColumns,
+  resetColumnWidths,
+  hasUserSizedColumns,
   nullColumnsHidden,
   allNullColumnCount,
   canToggleAllNullColumns,
@@ -14301,6 +14328,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       frozenColumnCount: frozenColumnCount.value,
       contextVisibleColIdx: contextHeaderVisibleColIdx.value ?? undefined,
       hasColumnSelection: hasColumnSelection.value,
+      hasUserSizedColumns: hasUserSizedColumns.value,
       selectedColumnCount,
       visibleColumnCount: visibleColumnCount.value,
       hiddenColumnCount: hiddenColumnCount.value,
@@ -14331,6 +14359,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         hideSelectedColumns: t("grid.hideSelectedColumns", { count: selectedColumnCount }),
         hideIdenticalColumns: identicalColumnCount > 0 ? t("grid.hideIdenticalColumnsCount", { count: identicalColumnCount }) : t("grid.hideIdenticalColumns"),
         showAllColumnsMenu: t("grid.showAllColumnsMenu"),
+        clearRememberedColumnWidths: t("grid.clearRememberedColumnWidths"),
       },
       icons: {
         copy: Copy,
@@ -14339,6 +14368,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         ascending: ArrowUp,
         descending: ArrowDown,
         clearSort: Eraser,
+        clearRememberedColumnWidths: RotateCcw,
       },
       actions: {
         copyName: copyHeaderColumnOrSelected,
@@ -14348,6 +14378,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         copyAlterSql: copyAlterColumnSql,
         copyMetadata: copyContextColumnMetadata,
         sort: applyContextSort,
+        clearRememberedColumnWidths: () => {
+          resetColumnWidths();
+          clearCellSelection();
+        },
         freezeToColumn: () => {
           const idx = contextHeaderVisibleColIdx.value;
           if (idx !== null && idx >= 0) {
@@ -14679,6 +14713,21 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @wheel="onDataGridTopbarFixedActionWheel"
           >
             <template #leading>
+              <!-- Once the banner is silenced for good, the full-text entry moves
+                   into the existing action row rather than keeping an empty
+                   banner line of its own. -->
+              <Tooltip v-if="tableDataPreviewTruncated && tableDataPreviewNoticeHidden && !tableDataFullTextMode">
+                <TooltipTrigger as-child>
+                  <Button variant="ghost" size="sm" :disabled="tableDataFullTextLoading" class="data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5" @click="loadCurrentPageFullText">
+                    <Info class="data-grid-topbar-action-icon w-3 h-3 text-amber-600 dark:text-amber-400" />
+                    <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbarActions }">{{ t("grid.tableDataPreviewLoadPageShort") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-sm">
+                  <p>{{ t("grid.tableDataPreviewNotice") }}</p>
+                  <p class="mt-1 opacity-80">{{ t("grid.tableDataPreviewLoadPageHint") }}</p>
+                </TooltipContent>
+              </Tooltip>
               <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbarActions" />
               <DataGridVirtualRowIdentifier
                 v-if="showVirtualRowIdentifierControl"
@@ -14839,12 +14888,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @copy-sql="copySortSqlPreview"
           @apply="applyStructuredSortRules"
         />
-        <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289). -->
+        <!-- Large table preview notice: explicit opt-in instead of guessing from column width (#12289).
+             Once "don't show again" is used the banner disappears and the full-text entry moves into the
+             toolbar action row, so no extra line is kept just for an icon (#12906). -->
         <div v-if="showTableDataPreviewNotice" data-grid-preview-notice class="shrink-0 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-300 flex flex-wrap items-center gap-x-2 gap-y-1">
           <Info class="h-3.5 w-3.5 shrink-0" />
           <span>{{ t("grid.tableDataPreviewNotice") }}</span>
           <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 disabled:opacity-50 dark:hover:text-amber-100" :disabled="tableDataFullTextLoading" @click="loadCurrentPageFullText">
             {{ tableDataFullTextLoading ? t("grid.tableDataPreviewLoading") : t("grid.tableDataPreviewLoadPage") }}
+          </button>
+          <button type="button" class="font-medium underline underline-offset-2 decoration-dotted hover:text-amber-900 dark:hover:text-amber-100" @click="hideTableDataPreviewNoticeForGood">
+            {{ t("grid.tableDataPreviewDontShowAgain") }}
           </button>
           <button
             type="button"

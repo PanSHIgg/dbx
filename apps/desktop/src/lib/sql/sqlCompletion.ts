@@ -1131,6 +1131,8 @@ const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
 ]);
 
 const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
+  ["AES_ENCRYPT", ["str", "key_str"]],
+  ["AES_DECRYPT", ["crypt_str", "key_str"]],
   ["CONVERT", ["expression", "type"]],
   ["DATE_FORMAT", ["date", "format"]],
   ["FROM_UNIXTIME", ["unix_timestamp"]],
@@ -1862,6 +1864,9 @@ class SqlCompletionProvider {
   private readonly items: SqlCompletionItem[] = [];
   private readonly t?: SqlCompletionTranslations;
   private readonly dialect?: SqlCompletionApplyDialect;
+  // Keep identifier folding semantics even when generated identifier quotes are
+  // disabled. Quoting and folding are independent database behaviors.
+  private readonly identifierDialect?: SqlCompletionApplyDialect;
   private readonly databaseType?: DatabaseType;
   private readonly columnsByTable: Map<string, SqlCompletionColumn[]>;
 
@@ -1871,6 +1876,7 @@ class SqlCompletionProvider {
   ) {
     this.t = input.translations;
     const dialect = sqlCompletionApplyDialect(input.databaseType, input.dialect);
+    this.identifierDialect = dialect;
     // "Quote identifiers in generated SQL" off: Oracle-like and upper-folding (Dameng, DB2)
     // completions insert bare names instead of quoting mixed-case ones.
     this.dialect = input.quoteIdentifiers === false && (dialect === "oracle" || dialect === "upper") ? undefined : dialect;
@@ -1992,9 +1998,9 @@ class SqlCompletionProvider {
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
       const autoAliasTables = !!this.input.autoAliasTables && context.autoAliasTableCompletions && !context.tableCompletionTargetAliasUnsafe && supportsTableAliases(this.databaseType);
       const schemaQualification = normalizeSqlTableCompletionSchemaQualification(this.input.tableCompletionSchemaQualification);
-      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase));
-      this.items.push(...buildReferencedTableItems(context, completionTables, this.dialect, this.input.identifierCase));
-      this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase));
+      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect));
+      this.items.push(...buildReferencedTableItems(context, completionTables, this.dialect, this.input.identifierCase, this.identifierDialect));
+      this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams));
       }
@@ -4628,14 +4634,14 @@ function quoteCasedIdentifier(originalName: string, casedName: string, dialect?:
   return casedName !== originalName ? casedName : quoteCompletionApplyIdentifier(originalName, dialect);
 }
 
-function applySqlIdentifierCaseToName(name: string, identifierCase?: SqlKeywordCase, dialect?: SqlCompletionApplyDialect): string {
+function applySqlIdentifierCaseToName(name: string, identifierCase?: SqlKeywordCase, dialect?: SqlCompletionApplyDialect, identifierDialect = dialect): string {
   if (!identifierCase || identifierCase === "preserve") return name;
   const parts = splitQualifiedNameRawParts(name);
   if (parts.length === 0) return name;
   return parts
     .map((part) => {
       if (isQuotedIdentifier(part.trim())) return part;
-      const cased = applySqlIdentifierCase(part, identifierCase, dialect);
+      const cased = applySqlIdentifierCase(part, identifierCase, identifierDialect);
       return quoteCasedIdentifier(part, cased, dialect);
     })
     .join(".");
@@ -4676,6 +4682,7 @@ function resolveTableSchemaQualification(
   schemasByTableName: Map<string, Set<string>>,
   schemaQualificationMode: SqlTableCompletionSchemaQualification,
   identifierCase?: SqlKeywordCase,
+  identifierDialect?: SqlCompletionApplyDialect,
 ): { ambiguousTableName: boolean; schemaQualification: boolean; defaultApplyName: string } {
   const oracleSchemaQualification = isOracleCompletionDatabase(databaseType) && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
   // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
@@ -4683,9 +4690,9 @@ function resolveTableSchemaQualification(
   // generic/PostgreSQL/SQL Server paths only when metadata is ambiguous.
   const ambiguousTableName = !isOracleCompletionDatabase(databaseType) && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
   const schemaQualification = !!table.schema && (schemaQualificationMode === "always" || (schemaQualificationMode === "collision" && (oracleSchemaQualification || ambiguousTableName)));
-  const tableName = applySqlIdentifierCase(table.name, identifierCase, dialect);
+  const tableName = applySqlIdentifierCase(table.name, identifierCase, identifierDialect ?? dialect);
   const quotedTable = quoteCasedIdentifier(table.name, tableName, dialect);
-  const defaultApplyName = schemaQualification && table.schema ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, dialect), dialect)}.${quotedTable}` : quotedTable;
+  const defaultApplyName = schemaQualification && table.schema ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, identifierDialect ?? dialect), dialect)}.${quotedTable}` : quotedTable;
   return { ambiguousTableName, schemaQualification, defaultApplyName };
 }
 
@@ -4702,7 +4709,7 @@ function resolveTableSchemaQualification(
  * actually selects from, while a catalog table is only a name that matched
  * (the catalog path scores initials and subsequence matches up to 2400).
  */
-function buildReferencedTableItems(context: SqlCompletionContext, completionTables: SqlCompletionTable[], dialect?: SqlCompletionApplyDialect, identifierCase?: SqlKeywordCase): SqlCompletionItem[] {
+function buildReferencedTableItems(context: SqlCompletionContext, completionTables: SqlCompletionTable[], dialect?: SqlCompletionApplyDialect, identifierCase?: SqlKeywordCase, identifierDialect?: SqlCompletionApplyDialect): SqlCompletionItem[] {
   const knownTables = new Set(completionTables.map((table) => normalizeIdentifierPart(table.name)));
   const seen = new Set<string>();
   const items: SqlCompletionItem[] = [];
@@ -4715,7 +4722,7 @@ function buildReferencedTableItems(context: SqlCompletionContext, completionTabl
     const key = normalizeIdentifierPart(reference.name);
     if (!key || knownTables.has(key) || seen.has(key)) continue;
     seen.add(key);
-    const tableName = applySqlIdentifierCase(reference.name, identifierCase, dialect);
+    const tableName = applySqlIdentifierCase(reference.name, identifierCase, identifierDialect ?? dialect);
     const applyName = quoteCasedIdentifier(reference.name, tableName, dialect);
     items.push({
       label: tableName,
@@ -4780,6 +4787,7 @@ function buildTableItems(
   currentSchema?: string,
   schemaQualificationMode: SqlTableCompletionSchemaQualification = "collision",
   identifierCase?: SqlKeywordCase,
+  identifierDialect?: SqlCompletionApplyDialect,
 ): SqlCompletionItem[] {
   const { prefix } = context;
   const qualifierSchema = context.qualifierParts?.[context.qualifierParts.length - 1] ?? context.qualifier?.split(".").filter(Boolean).pop();
@@ -4790,12 +4798,12 @@ function buildTableItems(
   return matchingTables
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
-      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName, schemaQualificationMode, identifierCase);
-      const tableName = applySqlIdentifierCase(table.name, identifierCase, dialect);
+      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName, schemaQualificationMode, identifierCase, identifierDialect);
+      const tableName = applySqlIdentifierCase(table.name, identifierCase, identifierDialect ?? dialect);
       const unqualifiedApplyName = quoteCasedIdentifier(table.name, tableName, dialect);
       const rawSuppliedApplyName = table.applyName?.trim();
       const suppliedApplyName = dialect === "sqlserver" && rawSuppliedApplyName ? quoteCompletionApplyName(rawSuppliedApplyName, dialect) : rawSuppliedApplyName;
-      const casedSuppliedApplyName = suppliedApplyName ? applySqlIdentifierCaseToName(suppliedApplyName, identifierCase, dialect) : undefined;
+      const casedSuppliedApplyName = suppliedApplyName ? applySqlIdentifierCaseToName(suppliedApplyName, identifierCase, dialect, identifierDialect) : undefined;
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
       const applyName =
         qualifiedByContext || schemaQualificationMode === "never"
@@ -4822,7 +4830,7 @@ function buildTableItems(
         comment,
         dedupeKey:
           schemaQualificationMode === "never" && table.schema
-            ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, dialect), dialect)}.${unqualifiedApplyName}`
+            ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, identifierDialect ?? dialect), dialect)}.${unqualifiedApplyName}`
             : table.applyName || ambiguousTableName || (isOracleCompletionDatabase(databaseType) && table.schema)
               ? applyName
               : undefined,
@@ -4842,6 +4850,7 @@ function buildForeignKeyRelatedTableItems(
   currentSchema?: string,
   schemaQualificationMode: SqlTableCompletionSchemaQualification = "collision",
   identifierCase?: SqlKeywordCase,
+  identifierDialect?: SqlCompletionApplyDialect,
 ): SqlCompletionItem[] {
   if (!foreignKeysByTable || context.referencedTables.length === 0) return [];
   const candidates = new Map<string, { table: SqlCompletionTable; detail: string }>();
@@ -4874,8 +4883,8 @@ function buildForeignKeyRelatedTableItems(
   return [...candidates.values()]
     .map(({ table, detail }) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
-      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName, schemaQualificationMode, identifierCase);
-      const tableName = applySqlIdentifierCase(table.name, identifierCase, dialect);
+      const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName, schemaQualificationMode, identifierCase, identifierDialect);
+      const tableName = applySqlIdentifierCase(table.name, identifierCase, identifierDialect ?? dialect);
       const unqualifiedApplyName = quoteCasedIdentifier(table.name, tableName, dialect);
       const applyName = qualifiedByContext || schemaQualificationMode === "never" ? unqualifiedApplyName : defaultApplyName;
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
@@ -4893,7 +4902,7 @@ function buildForeignKeyRelatedTableItems(
         // candidate for the same schema-qualified table collapse to one entry.
         dedupeKey:
           schemaQualificationMode === "never" && table.schema
-            ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, dialect), dialect)}.${unqualifiedApplyName}`
+            ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, identifierDialect ?? dialect), dialect)}.${unqualifiedApplyName}`
             : ambiguousTableName || (isOracleCompletionDatabase(databaseType) && table.schema)
               ? applyName
               : undefined,

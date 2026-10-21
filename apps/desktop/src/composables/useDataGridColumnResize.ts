@@ -57,6 +57,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   // Only manual widths survive font metrics/density changes and persist across sessions.
   const manualColumnIndexes = shallowRef<Set<number>>(new Set());
   const autoFittedColumnIndexes = shallowRef<Set<number>>(new Set());
+  const hasUserSizedColumns = computed(() => manualColumnIndexes.value.size > 0 || autoFittedColumnIndexes.value.size > 0);
 
   function columnWidthStateIdentity() {
     return {
@@ -276,6 +277,11 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     persistColumnWidths();
   }
 
+  function resetColumnWidths() {
+    removeDataGridColumnWidthState(options.cacheKey?.value);
+    initColumnWidths(true);
+  }
+
   const resolvedRowNumberWidth = computed(() => options.rowNumberWidth?.value ?? DATA_GRID_ROW_NUM_WIDTH);
 
   const renderedColumnWidths = computed(() => {
@@ -363,6 +369,8 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     onResizeStart,
     autoFitColumn,
     autoFitAllColumns,
+    resetColumnWidths,
+    hasUserSizedColumns,
     renderedColumnWidths,
     totalWidth,
     columnVars,

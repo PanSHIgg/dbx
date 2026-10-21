@@ -587,6 +587,13 @@ describe("settingsTransfer", () => {
     if (result.ok) expect(result.value.editorSettings.sqlFormatter).toEqual(sqlFormatter);
   });
 
+  it("accepts and transfers sql variable syntax overrides with boolean flags", () => {
+    const overrides = { postgres: { substitution: true }, oracle: { substitution: false } };
+    const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: overrides }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sqlVariableSyntaxOverrides).toEqual(overrides);
+  });
+
   it("rejects malformed sql variable syntax overrides", () => {
     const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
     expect(result.ok).toBe(false);

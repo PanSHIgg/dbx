@@ -20,6 +20,7 @@ import {
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
 import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
+import { sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 import type { DatabaseType } from "../../apps/desktop/src/types/database.ts";
 
 const tables: SqlCompletionTable[] = [
@@ -316,6 +317,41 @@ test("suggests MySQL VERSION and REVERSE without broadening other dialects", () 
     false,
   );
   assert.equal(buildFunctionItems("reve").find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+});
+
+test("suggests MySQL AES functions with required arguments, including through JDBC MySQL", () => {
+  const jdbcMysqlType = sqlSnippetDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app" });
+  assert.equal(jdbcMysqlType, "mysql");
+
+  for (const databaseType of ["mysql", jdbcMysqlType] as const) {
+    for (const [name, parameters] of [
+      ["AES_ENCRYPT", ["str", "key_str"]],
+      ["AES_DECRYPT", ["crypt_str", "key_str"]],
+    ] as const) {
+      const sql = `SELECT ${name.slice(0, -3)}`;
+      const items = buildSqlCompletionItems(sql, sql.length, {
+        tables: [],
+        columnsByTable: new Map(),
+        databaseType,
+      });
+      assert.equal(items.find((item) => item.type === "function" && item.label === name)?.apply, `${name}(${parameters.map((parameter) => `\${${parameter}}`).join(", ")})`);
+      const call = `SELECT ${name}(`;
+      assert.deepEqual(getSqlFunctionSignatureHelp(call, call.length, databaseType)?.parameters, parameters);
+    }
+  }
+
+  for (const databaseType of ["postgres", "sqlserver"] as const) {
+    const sql = "SELECT AES_";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+    assert.equal(
+      items.some((item) => item.type === "function" && (item.label === "AES_ENCRYPT" || item.label === "AES_DECRYPT")),
+      false,
+    );
+  }
 });
 
 test("suggests the reported MySQL 5.7 built-in functions with dialect-specific signatures", () => {
@@ -2085,7 +2121,10 @@ test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses externa
   });
 
   // Should NOT suggest columns from other tables when defining column types
-  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+  assert.equal(
+    items.some((item) => item.label === "UpdateDate"),
+    false,
+  );
 
   // UNIQUEIDENTIFIER must rank above UNION and UPDATE
   const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
@@ -4843,6 +4882,20 @@ test("Oracle mixed-case table completions preserve case and quotes under identif
   assert.equal(userItem?.apply, '"Users"', "should keep double quotes and original case for mixed-case Oracle table");
 });
 
+test.each(["oracle", "dameng", "db2"] as const)("folding dialect %s still applies identifierCase when quoting is disabled (#12938)", (databaseType) => {
+  const items = buildSqlCompletionItems("select * from u", "select * from u".length, {
+    tables: [{ name: "USERS", type: "table" as const }],
+    columnsByTable: new Map(),
+    databaseType,
+    identifierCase: "lower",
+    quoteIdentifiers: false,
+    autoAliasTables: false,
+  });
+  const userItem = items.find((item) => item.type === "table");
+  assert.equal(userItem?.label, "users", "folding dialects should keep the formatter case setting");
+  assert.equal(userItem?.apply, "users", "folding dialects should emit a safe bare identifier");
+});
+
 test("schema-qualified table completions follow identifierCase (#11400)", () => {
   const collidingTables = [
     { name: "ORDERS", schema: "SCOTT", type: "table" as const },
@@ -4863,9 +4916,7 @@ test("schema-qualified table completions follow identifierCase (#11400)", () => 
 });
 
 test("table completions with applyName follow identifierCase (#11400)", () => {
-  const tablesWithApplyName = [
-    { name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const },
-  ];
+  const tablesWithApplyName = [{ name: "DEPT_DICT", schema: "COMM", applyName: "COMM.DEPT_DICT", type: "table" as const }];
   const items = buildSqlCompletionItems("select * from d", "select * from d".length, {
     tables: tablesWithApplyName,
     columnsByTable: new Map(),
@@ -4916,7 +4967,10 @@ test("table and column completions can be searched by comments (#12033)", () => 
     databaseType: "mysql",
   });
   assert.ok(hanTableItems.some((item) => item.label === "t_user"));
-  assert.equal(hanTableItems.some((item) => item.label === "t_order"), false);
+  assert.equal(
+    hanTableItems.some((item) => item.label === "t_order"),
+    false,
+  );
 
   // Table matching by pinyin initials of comment
   const pinyinTableItems = buildSqlCompletionItems("select * from ddb", "select * from ddb".length, {
@@ -4980,4 +5034,3 @@ test("table and column completions can be searched by comments (#12033)", () => 
   assert.ok(userLogIndex >= 0 && historyIndex >= 0);
   assert.ok(userLogIndex < historyIndex, "Name match should rank ahead of comment match");
 });
-
