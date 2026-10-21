@@ -103,6 +103,7 @@ import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } 
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
+import { createQueryEditorBookmarks, type QueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
 import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
@@ -1332,6 +1333,8 @@ function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutAction
   return true;
 }
 
+let bookmarkShortcuts: QueryEditorBookmarks | null = null;
+
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorRuntime.codeMirrorPrec;
@@ -1470,6 +1473,9 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.previousStatement, (currentView) => navigateStatementFromView(currentView, "previous")),
         ...binding(shortcuts.nextStatement, (currentView) => navigateStatementFromView(currentView, "next")),
         ...binding(shortcuts.statementStart, (currentView) => navigateStatementFromView(currentView, "start")),
+        ...binding(shortcuts.toggleBookmark, (currentView) => bookmarkShortcuts?.toggle(currentView) ?? false),
+        ...binding(shortcuts.nextBookmark, (currentView) => bookmarkShortcuts?.next(currentView) ?? false),
+        ...binding(shortcuts.previousBookmark, (currentView) => bookmarkShortcuts?.previous(currentView) ?? false),
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
@@ -2064,6 +2070,11 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       signatureHelpWindowChars: SQL_SIGNATURE_HELP_WINDOW_CHARS,
       boundedAnalysisEnabled: boundedEditorAnalysisEnabled,
     });
+    const bookmarks = createQueryEditorBookmarks({
+      modules,
+      toggleLabel: () => t("settings.shortcutToggleBookmark"),
+    });
+    bookmarkShortcuts = bookmarks;
     const initialSettings = settingsStore.editorSettings;
     const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
     if (initialSettings.vimModeEnabled) {
@@ -2099,6 +2110,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         statementBoundariesTrackingPlugin,
         createQueryEditorNativeSelectionGuard(ViewPlugin, { enabled: isTauriRuntime() && isMacOS(), inputHandler: EditorView.inputHandler, finalizeClipboardText: (text) => clipboardLineEndings(text) }),
         initializedRuntime.runGutterComp.of(runStatementGutterExtension()),
+        bookmarks.extension,
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,
